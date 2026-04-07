@@ -1,0 +1,4 @@
+ROC AUC (micro): 0.998563
+PR AUC / MUI (micro): 0.947640
+ECE (10 bins): 0.076006
+Brier score (macro over classes): 0.001752

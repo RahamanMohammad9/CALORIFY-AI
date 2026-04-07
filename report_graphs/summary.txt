@@ -1,0 +1,17 @@
+Calorify AI Report Graph Summary
+========================================
+
+Overall test accuracy: 83.33%
+Number of classes: 100
+Number of test samples: 11649
+
+Generated files:
+- training_validation_accuracy.png (if history exists)
+- training_validation_loss.png (if history exists)
+- confusion_matrix.png
+- normalized_confusion_matrix.png
+- per_class_accuracy.png
+- prediction_confidence_histogram.png
+- sample_predictions.png
+- classification_report.csv
+- class_distribution_train.png

@@ -1,0 +1,2 @@
+accuracy_pct,macro_f1,weighted_f1,roc_auc_micro,pr_auc_micro,ece_10_bins,brier_macro,top5_classes_by_roc_auc,bottom5_classes_by_roc_auc
+88.5,0.8834,0.8846,0.998563,0.94764,0.076006,0.001752,edamame (1.000) | oysters (1.000) | escargots (1.000) | spaghetti_bolognese (1.000) | deviled_eggs (1.000),cheesecake (0.988) | scallops (0.990) | pork_chop (0.991) | risotto (0.993) | omelette (0.994)
