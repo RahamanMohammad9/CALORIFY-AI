@@ -1,0 +1,16 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Database
+*.db
+
+# VS Code / IDE
+.vs/
+.vscode/
+
+# Data
+data/
+
+# Models
+*.pth

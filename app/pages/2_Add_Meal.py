@@ -13,6 +13,7 @@ from PIL import Image
 import pandas as pd
 import httpx
 
+from dataset_setup import ensure_food101
 from database import (
     add_favorite_food,
     create_table,
@@ -42,8 +43,8 @@ create_table()
 # Setup paths
 # -----------------------------
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 NUTRITION_PATH = os.path.join(PROJECT_ROOT, "nutrition_data.csv")
+
 # -----------------------------
 # File checks
 # -----------------------------
@@ -66,8 +67,22 @@ if missing_files:
 def load_nutrition_data():
     return pd.read_csv(NUTRITION_PATH)
 
+# Ensure Food-101 exists before model bundle/class loading uses it
+try:
+    ensure_food101()
+except Exception as e:
+    st.error(f"Could not prepare Food-101 dataset: {e}")
+    st.stop()
 
-class_names, _model, device = load_model_bundle()
+try:
+    class_names, _model, device = load_model_bundle()
+except FileNotFoundError:
+    st.error("Model file not found. Please place your trained model file in the models folder.")
+    st.stop()
+except Exception as e:
+    st.error(f"Could not load model bundle: {e}")
+    st.stop()
+
 nutrition_df = load_nutrition_data()
 
 # -----------------------------
@@ -96,7 +111,6 @@ def get_nutrition(food_name):
 
 def parse_voice_items(text):
     cleaned = str(text).lower().strip()
-    # Remove common conversational prefixes to improve parsing.
     cleaned = re.sub(r"^(i\s+(ate|had|have|consumed)\s+)", "", cleaned)
     cleaned = re.sub(r"^(today\s+i\s+(ate|had)\s+)", "", cleaned)
     parts = re.split(r",| and ", cleaned)
@@ -105,41 +119,47 @@ def parse_voice_items(text):
         token = raw.strip()
         if not token:
             continue
-        # Pattern: optional quantity + optional unit + food name
+
         m = re.match(r"(?:(\d+(?:\.\d+)?)\s*(x|piece|pieces|slice|slices|cup|cups)?\s+)?(.+)", token)
         if not m:
             continue
+
         qty = float(m.group(1)) if m.group(1) else 1.0
         name = m.group(3).strip()
         name = re.sub(r"^(of\s+)", "", name).strip()
-        # Singularize simple plurals (eggs -> egg) for better resolver matching.
+
         if name.endswith("es") and len(name) > 4:
             name_alt = name[:-2]
         elif name.endswith("s") and len(name) > 3:
             name_alt = name[:-1]
         else:
             name_alt = name
+
         if name in {"eggs", "egg"}:
             name_alt = "omelette"
         if name in {"toast"}:
             name_alt = "garlic bread"
+
         if not name:
             continue
-        # Simple default portion mapping: 1 item ~ 80g
+
         grams_est = max(20.0, qty * 80.0)
         items.append((name_alt, qty, grams_est))
+
     return items
 
 
 def try_resolve_voice_items(items):
     resolved = []
     unresolved = []
+
     for name, qty, grams_est in items:
         try:
             probe = resolve_food(name, float(grams_est))
             resolved.append((name, qty, grams_est, probe.source, probe.confidence))
         except Exception:
             unresolved.append((name, qty, grams_est))
+
     return resolved, unresolved
 
 
@@ -177,6 +197,7 @@ with st.sidebar:
         value=100,
         step=10
     )
+
     confidence_threshold = st.slider(
         "Confidence threshold (%)",
         min_value=40,
@@ -185,6 +206,7 @@ with st.sidebar:
         step=5,
         help="Predictions below this threshold require explicit confirmation before saving.",
     )
+
     local_only_lookup = st.checkbox(
         "Local-only nutrition lookup (demo safe)",
         value=False,
@@ -213,6 +235,7 @@ with tab_photo:
             type=["jpg", "jpeg", "png"],
             key="addmeal_photo_uploader",
         )
+
         detect_multiple = st.checkbox(
             "Detect multiple foods in this image",
             key="addmeal_multi_detect",
@@ -237,8 +260,15 @@ with tab_photo:
             except Exception:
                 st.error("Invalid or corrupted image file. Please upload a valid JPG/PNG image.")
                 st.stop()
+
             st.image(image, caption="Uploaded image", width="stretch")
-            top_preds = predict_topk(image, top_k=3, use_tta=True)
+
+            try:
+                top_preds = predict_topk(image, top_k=3, use_tta=True)
+            except Exception as e:
+                st.error(f"Prediction failed: {e}")
+                st.stop()
+
             predicted_food = top_preds[0][0]
             confidence_value = top_preds[0][1]
 
@@ -252,6 +282,7 @@ with tab_photo:
                     f"Low confidence ({confidence_value:.1f}% < {confidence_threshold}%). "
                     "Please confirm this prediction before saving."
                 )
+
             confirm_low_conf = st.checkbox(
                 "I confirm this prediction is correct",
                 key="confirm_low_conf",
@@ -261,12 +292,14 @@ with tab_photo:
             if detect_multiple:
                 st.markdown("### Multi-food selection")
                 top3_names = [n for n, _p in top_preds]
+
                 selected_multi = st.multiselect(
                     "Choose foods present in this image",
                     options=top3_names,
                     default=top3_names[:2],
                     key="addmeal_photo_multi_foods",
                 )
+
                 multi_items = []
                 for idx, food_name in enumerate(selected_multi):
                     portion = st.slider(
@@ -277,14 +310,18 @@ with tab_photo:
                         step=10,
                         key=f"addmeal_photo_multi_portion_{idx}",
                     )
+
                     nutr = get_nutrition(food_name)
                     item_cal = (nutr["calories_per_100g"] * portion) / 100
                     item_prot = (nutr["protein"] * portion) / 100
                     item_carb = (nutr["carbs"] * portion) / 100
                     item_fat = (nutr["fat"] * portion) / 100
+
                     multi_items.append((food_name, portion, item_cal, item_prot, item_carb, item_fat))
+
                     st.caption(
-                        f"{food_name}: {item_cal:.1f} kcal | P {item_prot:.1f}g | C {item_carb:.1f}g | F {item_fat:.1f}g"
+                        f"{food_name}: {item_cal:.1f} kcal | "
+                        f"P {item_prot:.1f}g | C {item_carb:.1f}g | F {item_fat:.1f}g"
                     )
 
                 if st.button("💾 Save Selected Meals", width="stretch", key="addmeal_save_multi_photo"):
@@ -333,6 +370,7 @@ with tab_photo:
                     key="addmeal_portion_estimate",
                     help="Heuristic estimate; adjust as needed.",
                 )
+
                 portion_grams = float(est_grams if est_grams > 0 else grams)
 
                 final_calories = (calories_per_100g * portion_grams) / 100
@@ -368,6 +406,7 @@ with tab_photo:
                         st.success("Meal saved successfully.")
         else:
             st.info("Upload an image to start.")
+
         st.markdown('</div>', unsafe_allow_html=True)
 
     with right_col:
@@ -398,6 +437,7 @@ with tab_photo:
                 r4.metric("Fat/100g", f"{fat_per_100g:.1f}")
             else:
                 st.info("Multi-food mode enabled. Review and save from the left panel.")
+
         st.markdown('</div>', unsafe_allow_html=True)
 
 with tab_name:
@@ -419,6 +459,7 @@ with tab_name:
         key="addmeal_name_food",
         help="Shown in your meal history. For manual entry this can be any label you want.",
     )
+
     name_grams = st.number_input(
         "Portion (grams)",
         min_value=1.0,
@@ -444,6 +485,7 @@ with tab_name:
     if manual_entry:
         st.markdown("##### Nutrition for this portion")
         st.caption("Values below are saved as-is (for this portion size).")
+
         mc1, mc2, mc3, mc4 = st.columns(4)
         with mc1:
             man_cal = st.number_input(
@@ -512,16 +554,20 @@ with tab_name:
             else:
                 try:
                     if local_only_lookup:
-                        local_row = nutrition_df[nutrition_df["food"] == name_food.strip().lower().replace(" ", "_")]
+                        local_row = nutrition_df[
+                            nutrition_df["food"] == name_food.strip().lower().replace(" ", "_")
+                        ]
                         if local_row.empty:
                             raise LookupError(
                                 "No local match found. Disable local-only mode or use a food from the local dataset."
                             )
+
                         cph = float(local_row["calories_per_100g"].values[0])
                         pph = float(local_row["protein"].values[0])
                         carbph = float(local_row["carbs"].values[0])
                         fph = float(local_row["fat"].values[0])
                         factor = float(name_grams) / 100.0
+
                         class _LocalResolved:
                             def __init__(self):
                                 self.display_name = name_food.strip().title()
@@ -536,9 +582,11 @@ with tab_name:
                                 self.fat_per_100g = fph
                                 self.source = "local_csv"
                                 self.confidence = 1.0
+
                         resolved = _LocalResolved()
                     else:
                         resolved = resolve_food(name_food.strip(), float(name_grams))
+
                     st.session_state["addmeal_name_result"] = resolved
                     st.session_state["addmeal_name_key"] = name_lookup_key
                     st.session_state["addmeal_portion_cal"] = float(round(resolved.calories, 2))
@@ -566,6 +614,7 @@ with tab_name:
             st.caption(
                 f"Source: **{src}** · match: `{stored.matched_key}` · confidence ~{stored.confidence * 100:.0f}%"
             )
+
             st.markdown("##### Values for this portion (edit if wrong)")
             ec1, ec2, ec3, ec4 = st.columns(4)
             with ec1:
@@ -600,6 +649,7 @@ with tab_name:
                     step=0.5,
                     key="addmeal_portion_fat",
                 )
+
             with st.expander("Per 100 g reference (from lookup)"):
                 st.write(
                     f"Calories {stored.calories_per_100g:.1f} kcal · "
@@ -611,17 +661,17 @@ with tab_name:
         if name_save:
             s = st.session_state.get("addmeal_name_result")
             sk = st.session_state.get("addmeal_name_key")
+
             if not name_food.strip():
                 st.warning("Enter a food name.")
             elif s is None or sk != name_lookup_key:
-                st.warning(
-                    "Click **Look up nutrition** first, or enable **Enter nutrition manually** above."
-                )
+                st.warning("Click **Look up nutrition** first, or enable **Enter nutrition manually** above.")
             else:
                 cal_v = float(st.session_state.get("addmeal_portion_cal", s.calories))
                 p_v = float(st.session_state.get("addmeal_portion_prot", s.protein))
                 c_v = float(st.session_state.get("addmeal_portion_carb", s.carbs))
                 f_v = float(st.session_state.get("addmeal_portion_fat", s.fat))
+
                 if cal_v <= 0:
                     st.warning("Calories must be greater than 0.")
                 else:
@@ -632,6 +682,7 @@ with tab_name:
                         or abs(f_v - s.fat) > 0.51
                     )
                     save_conf = 92.0 if macros_edited else s.confidence * 100.0
+
                     meal_id = insert_meal(
                         food_name=s.display_name,
                         grams=float(name_grams),
@@ -708,21 +759,28 @@ st.markdown("</div>", unsafe_allow_html=True)
 
 st.markdown('<div class="glass-card">', unsafe_allow_html=True)
 st.subheader("Voice-style Logging")
+
 voice_text = st.text_input(
     "Type a natural meal sentence",
     placeholder='e.g. "I ate 2 eggs and toast"',
     key="voice_like_input",
 )
+
 if voice_text.strip():
     parsed_items = parse_voice_items(voice_text)
     if parsed_items:
         resolved_preview, unresolved_preview = try_resolve_voice_items(parsed_items)
         st.caption("Parsed items (editable via estimated grams):")
+
         if resolved_preview:
             st.markdown("##### Resolution preview")
             for name, qty, grams_est, src, conf in resolved_preview:
                 source_name = "Local CSV" if src == "local_csv" else "Open Food Facts"
-                st.write(f"- **{name}** ({qty:g}x) ~{grams_est:.0f}g · source: {source_name} · confidence: {conf*100:.0f}%")
+                st.write(
+                    f"- **{name}** ({qty:g}x) ~{grams_est:.0f}g · "
+                    f"source: {source_name} · confidence: {conf*100:.0f}%"
+                )
+
         if unresolved_preview:
             st.warning("Some items could not be resolved. Please rewrite these names before saving:")
             for name, qty, _g in unresolved_preview:
@@ -739,9 +797,11 @@ if voice_text.strip():
                 key=f"voice_item_grams_{i}",
             )
             edits.append((name, g))
+
         if st.button("Save parsed meal items", width="stretch", key="voice_like_save"):
             saved = 0
             failed = []
+
             for name, grams_v in edits:
                 try:
                     resolved = resolve_food(name, float(grams_v))
@@ -758,6 +818,7 @@ if voice_text.strip():
                     saved += 1
                 except Exception:
                     failed.append(name)
+
             if saved > 0:
                 st.success(f"Saved {saved} parsed item(s).")
             if failed:
@@ -766,4 +827,5 @@ if voice_text.strip():
                 st.error("No items were saved.")
     else:
         st.info("Could not parse items from this sentence yet. Try comma-separated foods.")
+
 st.markdown("</div>", unsafe_allow_html=True)
