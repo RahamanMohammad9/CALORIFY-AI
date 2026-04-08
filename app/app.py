@@ -1,21 +1,20 @@
-import streamlit as st
+import os
+import sqlite3
+
 import pandas as pd
 import plotly.graph_objects as go
-import sqlite3
-import os
+import streamlit as st
 
+from ai_insights import build_daily_insights
 from database import (
     create_table,
     get_all_meals,
-    get_today_totals,
     get_daily_calorie_history,
-    get_weekly_summary
+    get_daily_macro_history,
+    get_today_totals,
+    get_weekly_summary,
 )
-from ai_insights import build_daily_insights
 from profile_utils import calculate_daily_calories, load_profile, macro_targets
-
-# If you already added this in utils.py, keep this import.
-# Otherwise you can remove these 2 lines and paste your CSS directly.
 from utils import (
     ACCENT,
     ACCENT_FILL_A,
@@ -37,9 +36,10 @@ def get_health_connection():
     return sqlite3.connect(DB_PATH, check_same_thread=False)
 
 
-def get_latest_sleep_activity():
+def get_latest_sleep_activity_water_weight():
     conn = get_health_connection()
     cursor = conn.cursor()
+
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS sleep_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -57,12 +57,28 @@ def get_latest_sleep_activity():
         )
     """)
     cursor.execute("""
+        CREATE TABLE IF NOT EXISTS water_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            amount_ml REAL NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS weight_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            weight_kg REAL NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
+
+    cursor.execute("""
         SELECT sleep_hours, sleep_quality, created_at
         FROM sleep_logs
         ORDER BY created_at DESC
         LIMIT 1
     """)
     latest_sleep = cursor.fetchone()
+
     cursor.execute("""
         SELECT steps, workout_minutes, created_at
         FROM activity_logs
@@ -70,8 +86,150 @@ def get_latest_sleep_activity():
         LIMIT 1
     """)
     latest_activity = cursor.fetchone()
+
+    cursor.execute("""
+        SELECT COALESCE(SUM(amount_ml), 0)
+        FROM water_logs
+        WHERE substr(created_at, 1, 10) = date('now', 'localtime')
+    """)
+    latest_water_today = cursor.fetchone()
+
+    cursor.execute("""
+        SELECT weight_kg, created_at
+        FROM weight_logs
+        ORDER BY created_at DESC
+        LIMIT 1
+    """)
+    latest_weight = cursor.fetchone()
+
     conn.close()
-    return latest_sleep, latest_activity
+    return latest_sleep, latest_activity, latest_water_today, latest_weight
+
+
+def get_recent_health_series(limit_days: int = 7):
+    conn = get_health_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS sleep_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sleep_hours REAL NOT NULL,
+            sleep_quality INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS activity_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            steps INTEGER NOT NULL,
+            workout_minutes INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS weight_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            weight_kg REAL NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
+
+    cursor.execute(f"""
+        SELECT avg_sleep
+        FROM (
+            SELECT substr(created_at, 1, 10) AS day, AVG(sleep_hours) AS avg_sleep
+            FROM sleep_logs
+            GROUP BY substr(created_at, 1, 10)
+            ORDER BY day DESC
+            LIMIT {int(limit_days)}
+        )
+    """)
+    recent_sleep = [row[0] for row in cursor.fetchall()][::-1]
+
+    cursor.execute(f"""
+        SELECT avg_steps
+        FROM (
+            SELECT substr(created_at, 1, 10) AS day, AVG(steps) AS avg_steps
+            FROM activity_logs
+            GROUP BY substr(created_at, 1, 10)
+            ORDER BY day DESC
+            LIMIT {int(limit_days)}
+        )
+    """)
+    recent_steps = [row[0] for row in cursor.fetchall()][::-1]
+
+    cursor.execute(f"""
+        SELECT avg_weight
+        FROM (
+            SELECT substr(created_at, 1, 10) AS day, AVG(weight_kg) AS avg_weight
+            FROM weight_logs
+            GROUP BY substr(created_at, 1, 10)
+            ORDER BY day DESC
+            LIMIT {int(limit_days)}
+        )
+    """)
+    recent_weights = [row[0] for row in cursor.fetchall()][::-1]
+
+    conn.close()
+    return recent_sleep, recent_steps, recent_weights
+
+
+def _priority_badge(priority: str) -> str:
+    p = str(priority or "").lower()
+    if p == "high":
+        bg = "rgba(239, 68, 68, 0.18)"
+        border = "rgba(239, 68, 68, 0.35)"
+        text = "#fecaca"
+        label = "HIGH PRIORITY"
+    elif p == "medium":
+        bg = "rgba(245, 158, 11, 0.16)"
+        border = "rgba(245, 158, 11, 0.35)"
+        text = "#fde68a"
+        label = "MEDIUM PRIORITY"
+    else:
+        bg = "rgba(20, 184, 166, 0.16)"
+        border = "rgba(20, 184, 166, 0.35)"
+        text = "#ccfbf1"
+        label = "ON TRACK"
+
+    return f"""
+    <div style="
+        display:inline-block;
+        padding:0.42rem 0.72rem;
+        border-radius:999px;
+        background:{bg};
+        border:1px solid {border};
+        color:{text};
+        font-size:0.72rem;
+        font-weight:700;
+        letter-spacing:0.08em;
+        text-transform:uppercase;
+        margin-bottom:0.8rem;
+    ">
+        {label}
+    </div>
+    """
+
+
+def _render_bullets(title: str, items: list[str], kind: str = "neutral"):
+    if not items:
+        return
+
+    if kind == "critical":
+        icon = "🚨"
+    elif kind == "warning":
+        icon = "⚠️"
+    elif kind == "success":
+        icon = "✅"
+    elif kind == "pattern":
+        icon = "📊"
+    else:
+        icon = "•"
+
+    st.markdown(f"##### {title}")
+    for item in items:
+        st.write(f"{icon} {item}")
+
 
 # -----------------------------
 # Page config
@@ -96,7 +254,7 @@ st.markdown('<div class="glass-card">', unsafe_allow_html=True)
 st.subheader("Project Highlights")
 h1, h2 = st.columns(2)
 with h1:
-    st.write("**USP:** AI Nutrition Coach (not just calorie tracking).")
+    st.write("**USP:** AI Nutrition Coach, not just calorie tracking.")
     st.write("**Core stack:** Computer Vision + Streamlit + SQLite + Analytics.")
     st.write("**Personalization:** BMI, BMR, activity-aware targets, goal-based macros.")
 with h2:
@@ -106,7 +264,7 @@ with h2:
 st.markdown('</div>', unsafe_allow_html=True)
 
 # -----------------------------
-# Icon shortcuts (main dashboard only)
+# Dashboard navigation hub
 # -----------------------------
 DASHBOARD_NAV = [
     ("pages/2_Add_Meal.py", "🍽️", "Add Meal", "Photo or name, save meals"),
@@ -209,6 +367,7 @@ with st.sidebar:
             )
         )
     )
+
     calorie_goal = st.number_input(
         "Daily calorie goal",
         min_value=1000,
@@ -216,10 +375,17 @@ with st.sidebar:
         value=max(1000, min(5000, personalized_goal)),
         step=50
     )
-    st.caption(f"Personalized target from profile: **{personalized_goal} kcal/day**")
+    water_goal_ml = st.number_input(
+        "Daily water goal (ml)",
+        min_value=500,
+        max_value=6000,
+        value=2500,
+        step=100
+    )
 
+    st.caption(f"Personalized calorie target: **{personalized_goal} kcal/day**")
     st.markdown("---")
-    st.caption("Use the **pages** list above to switch sections.")
+    st.caption("Use the pages list above to switch sections.")
 
 # -----------------------------
 # Load data
@@ -227,12 +393,55 @@ with st.sidebar:
 today_calories, today_protein, today_carbs, today_fat = get_today_totals()
 week_calories, week_protein, week_carbs, week_fat = get_weekly_summary()
 history = get_daily_calorie_history()
+macro_history = get_daily_macro_history()
 meals = get_all_meals()
-latest_sleep, latest_activity = get_latest_sleep_activity()
+
+latest_sleep, latest_activity, latest_water_today, latest_weight = get_latest_sleep_activity_water_weight()
+recent_sleep, recent_steps, recent_weights = get_recent_health_series(limit_days=7)
+
+history_df = None
+macro_df = None
+
+if history:
+    history_df = pd.DataFrame(history, columns=["Date", "Calories"])
+if macro_history:
+    macro_df = pd.DataFrame(macro_history, columns=["Date", "Protein", "Carbs", "Fat"])
+
+recent_calories = []
+recent_protein = []
+recent_carbs = []
+
+if history_df is not None and len(history_df) > 0:
+    recent_calories = history_df["Calories"].tail(7).tolist()
+
+if macro_df is not None and len(macro_df) > 0:
+    recent_protein = macro_df["Protein"].tail(7).tolist()
+    recent_carbs = macro_df["Carbs"].tail(7).tolist()
 
 remaining = calorie_goal - today_calories
 goal_progress = min(today_calories / calorie_goal, 1.0) if calorie_goal > 0 else 0
 goal_percent = goal_progress * 100
+
+targets = macro_targets(calorie_goal, profile["weight_kg"], profile["goal"])
+coach = build_daily_insights(
+    today_calories=today_calories,
+    today_protein=today_protein,
+    today_carbs=today_carbs,
+    calorie_goal=calorie_goal,
+    protein_goal=targets["protein_g"],
+    carbs_goal=targets["carbs_g"],
+    goal=profile["goal"],
+    latest_sleep_hours=float(latest_sleep[0]) if latest_sleep else None,
+    latest_steps=int(latest_activity[0]) if latest_activity else None,
+    latest_water_ml=float(latest_water_today[0]) if latest_water_today else None,
+    water_goal_ml=water_goal_ml,
+    recent_calories=recent_calories,
+    recent_protein=recent_protein,
+    recent_carbs=recent_carbs,
+    recent_sleep_hours=recent_sleep,
+    recent_steps=recent_steps,
+    recent_weights=recent_weights,
+)
 
 # -----------------------------
 # Top section
@@ -311,20 +520,33 @@ with top_col2:
 # -----------------------------
 st.markdown('<div class="glass-card">', unsafe_allow_html=True)
 st.subheader("Lifestyle Snapshot")
-l1, l2, l3, l4 = st.columns(4)
+
+l1, l2, l3, l4, l5 = st.columns(5)
+
 if latest_sleep:
     l1.metric("Last Sleep", f"{float(latest_sleep[0]):.1f} h")
-    l2.metric("Sleep Quality", f"{int(latest_sleep[1])}/10")
 else:
     l1.metric("Last Sleep", "N/A")
+
+if latest_sleep:
+    l2.metric("Sleep Quality", f"{int(latest_sleep[1])}/10")
+else:
     l2.metric("Sleep Quality", "N/A")
+
 if latest_activity:
     l3.metric("Last Steps", f"{int(latest_activity[0]):,}")
-    l4.metric("Workout", f"{int(latest_activity[1])} min")
 else:
     l3.metric("Last Steps", "N/A")
+
+if latest_activity:
+    l4.metric("Workout", f"{int(latest_activity[1])} min")
+else:
     l4.metric("Workout", "N/A")
-st.caption("Track sleep and activity daily to unlock stronger AI coaching patterns.")
+
+water_today_value = float(latest_water_today[0]) if latest_water_today else 0.0
+l5.metric("Water Today", f"{water_today_value:.0f} ml")
+
+st.caption("Track sleep, water, activity, and weight daily to unlock stronger AI coaching patterns.")
 st.markdown('</div>', unsafe_allow_html=True)
 
 # -----------------------------
@@ -332,27 +554,40 @@ st.markdown('</div>', unsafe_allow_html=True)
 # -----------------------------
 st.markdown('<div class="glass-card">', unsafe_allow_html=True)
 st.subheader("AI Nutrition Coach")
-targets = macro_targets(calorie_goal, profile["weight_kg"], profile["goal"])
-coach = build_daily_insights(
-    today_calories=today_calories,
-    today_protein=today_protein,
-    today_carbs=today_carbs,
-    calorie_goal=calorie_goal,
-    protein_goal=targets["protein_g"],
-    carbs_goal=targets["carbs_g"],
-    goal=profile["goal"],
-    latest_sleep_hours=float(latest_sleep[0]) if latest_sleep else None,
-    latest_steps=int(latest_activity[0]) if latest_activity else None,
-)
 
-for msg in coach["warnings"]:
-    st.warning(msg)
-for msg in coach["info"]:
-    st.info(msg)
+st.markdown(_priority_badge(coach.get("priority", "low")), unsafe_allow_html=True)
 
-st.markdown("##### Smart suggestions")
-for s in coach["suggestions"]:
-    st.write(f"- {s}")
+a1, a2 = st.columns([1, 1])
+
+with a1:
+    st.markdown("##### Main issue today")
+    st.write(coach.get("main_issue", "No major issue detected today."))
+
+with a2:
+    st.markdown("##### Best action")
+    st.write(coach.get("best_action", "Stay consistent with your current routine."))
+
+st.markdown("##### Coach summary")
+st.write(coach.get("summary", "No summary available."))
+
+if coach.get("critical"):
+    _render_bullets("Critical alerts", coach["critical"], kind="critical")
+
+if coach.get("warnings"):
+    _render_bullets("Warnings", coach["warnings"], kind="warning")
+
+if coach.get("patterns"):
+    _render_bullets("Detected patterns", coach["patterns"], kind="pattern")
+
+if coach.get("wins"):
+    _render_bullets("What is going well", coach["wins"], kind="success")
+
+if coach.get("info"):
+    _render_bullets("Additional guidance", coach["info"], kind="neutral")
+
+if coach.get("suggestions"):
+    _render_bullets("Smart suggestions", coach["suggestions"], kind="neutral")
+
 st.markdown('</div>', unsafe_allow_html=True)
 
 # -----------------------------
@@ -365,13 +600,12 @@ with mid_col1:
     st.subheader("Daily Calorie Trend")
 
     if history:
-        history_df = pd.DataFrame(history, columns=["Date", "Calories"])
+        trend_df = pd.DataFrame(history, columns=["Date", "Calories"])
 
         fig = go.Figure()
-
         fig.add_trace(go.Scatter(
-            x=history_df["Date"],
-            y=history_df["Calories"],
+            x=trend_df["Date"],
+            y=trend_df["Calories"],
             mode="lines+markers",
             name="Calories",
             line=dict(color=ACCENT, width=3, shape="spline"),
@@ -404,6 +638,7 @@ with mid_col1:
         st.plotly_chart(fig, width="stretch")
     else:
         st.info("No calorie history available yet.")
+
     st.markdown('</div>', unsafe_allow_html=True)
 
 with mid_col2:
@@ -438,6 +673,13 @@ with mid_col2:
         st.plotly_chart(pie_fig, width="stretch")
     else:
         st.info("No macro data available for today yet.")
+
+    st.markdown("### Target vs Actual")
+    t1, t2, t3 = st.columns(3)
+    t1.metric("Protein Target", f"{targets['protein_g']:.0f} g")
+    t2.metric("Carb Target", f"{targets['carbs_g']:.0f} g")
+    t3.metric("Fat Guide", f"{targets['fat_g']:.0f} g")
+
     st.markdown('</div>', unsafe_allow_html=True)
 
 # -----------------------------
@@ -457,6 +699,7 @@ with bottom_col1:
         st.dataframe(recent_df, width="stretch", height=220)
     else:
         st.info("No meals saved yet.")
+
     st.markdown('</div>', unsafe_allow_html=True)
 
 with bottom_col2:
@@ -464,11 +707,13 @@ with bottom_col2:
     st.subheader("Quick Insights")
 
     total_meals = len(meals)
-    avg_daily = 0
-    if history:
-        history_df = pd.DataFrame(history, columns=["Date", "Calories"])
-        if len(history_df) > 0:
-            avg_daily = history_df["Calories"].mean()
+    avg_daily = 0.0
+    consistency_score = 0
+
+    if history_df is not None and len(history_df) > 0:
+        avg_daily = float(history_df["Calories"].mean())
+        days_near_goal = ((history_df["Calories"] >= calorie_goal * 0.9) & (history_df["Calories"] <= calorie_goal * 1.1)).sum()
+        consistency_score = int(round((days_near_goal / len(history_df)) * 100))
 
     last_meal_text = "No meals logged yet."
     if meals:
@@ -478,10 +723,12 @@ with bottom_col2:
     st.write(f"**Meals logged:** {total_meals}")
     st.write(f"**Average daily calories:** {avg_daily:.1f} kcal")
     st.write(f"**Last saved meal:** {last_meal_text}")
+    st.write(f"**Goal consistency:** {consistency_score}% of logged days near target")
 
     st.markdown("### Tips")
     st.write("- Use **Add Meal** to scan and save food.")
     st.write("- Use **Meal History** to review saved meals.")
     st.write("- Use **Analytics** for trends and deeper insights.")
-    st.write("- Use **Water Tracker** and **Weight Tracker** for a full health log.")
+    st.write("- Use all trackers regularly for stronger AI coaching.")
+
     st.markdown('</div>', unsafe_allow_html=True)

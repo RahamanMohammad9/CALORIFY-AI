@@ -1,9 +1,9 @@
 {
     "name": "Rahaman",
-    "age": 21,
+    "age": 23,
     "gender": "Male",
     "height_cm": 170.0,
-    "weight_kg": 70.0,
-    "activity_level": "Moderately active",
-    "goal": "Maintain"
+    "weight_kg": 64.0,
+    "activity_level": "Lightly active",
+    "goal": "Muscle Gain"
 }

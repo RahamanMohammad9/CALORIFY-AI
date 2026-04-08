@@ -1,5 +1,6 @@
 """
-Resolve nutrition per 100g from local Food-101-style CSV, then Open Food Facts.
+Resolve nutrition per 100g from local CSV first, then Open Food Facts.
+Designed for safer matching, cleaner fallback behavior, and better backend reliability.
 """
 
 from __future__ import annotations
@@ -13,15 +14,15 @@ from typing import Any
 
 import httpx
 
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 NUTRITION_CSV = PROJECT_ROOT / "nutrition_data.csv"
 
 OFF_HEADERS = {
-    "User-Agent": "Calorify/1.0 (meal lookup; respectful use of Open Food Facts)",
+    "User-Agent": "CalorifyAI/1.0 (nutrition lookup; educational use)",
     "Accept": "application/json",
 }
 
-# v2 search is usually more reliable than legacy CGI; CGI kept as fallback.
 OFF_ENDPOINTS: list[tuple[str, dict[str, str]]] = [
     (
         "https://world.openfoodfacts.org/api/v2/search",
@@ -51,13 +52,11 @@ OFF_ENDPOINTS: list[tuple[str, dict[str, str]]] = [
 
 
 class OpenFoodFactsUnavailableError(Exception):
-    """Raised when OFF returns repeated errors (e.g. 503) or non-JSON responses."""
-
     pass
+
 
 _nutrition_rows: list[dict[str, Any]] | None = None
 
-# Normalized keys → phrase that matches local CSV / fuzzy search
 _TYPO_ALIASES: dict[str, str] = {
     "biriyani": "chicken curry",
     "biryani": "chicken curry",
@@ -71,204 +70,6 @@ _TYPO_ALIASES: dict[str, str] = {
     "scrambled_eggs": "omelette",
     "toast": "garlic_bread",
 }
-
-
-def _normalize_label(s: str) -> str:
-    s = s.lower().strip()
-    s = re.sub(r"[^\w\s-]", "", s)
-    s = s.replace(" ", "_").replace("-", "_")
-    s = re.sub(r"_+", "_", s).strip("_")
-    return s
-
-
-def _token_set(s: str) -> set[str]:
-    n = _normalize_label(s).replace("_", " ")
-    return {t for t in n.split() if t}
-
-
-def _looks_like_reasonable_match(query: str, candidate: str) -> bool:
-    """
-    Guardrail against unrelated Open Food Facts hits.
-    Accept only if token overlap is meaningful.
-    """
-    q = _token_set(query)
-    c = _token_set(candidate)
-    if not q or not c:
-        return False
-    overlap = q.intersection(c)
-    # Exact token overlap is best.
-    if overlap:
-        return True
-    # Lightweight singular/plural relaxation (egg/eggs).
-    q_relaxed = {t[:-1] if t.endswith("s") and len(t) > 3 else t for t in q}
-    c_relaxed = {t[:-1] if t.endswith("s") and len(t) > 3 else t for t in c}
-    return bool(q_relaxed.intersection(c_relaxed))
-
-
-def _load_local_table() -> list[dict[str, Any]]:
-    global _nutrition_rows
-    if _nutrition_rows is not None:
-        return _nutrition_rows
-    rows: list[dict[str, Any]] = []
-    if NUTRITION_CSV.is_file():
-        with open(NUTRITION_CSV, newline="", encoding="utf-8") as f:
-            for r in csv.DictReader(f):
-                try:
-                    rows.append(
-                        {
-                            "food": str(r["food"]).strip(),
-                            "calories_per_100g": float(r["calories_per_100g"]),
-                            "protein": float(r["protein"]),
-                            "carbs": float(r["carbs"]),
-                            "fat": float(r["fat"]),
-                        }
-                    )
-                except (KeyError, ValueError, TypeError):
-                    continue
-    _nutrition_rows = rows
-    return rows
-
-
-def lookup_local(food_name: str) -> tuple[dict[str, Any], str, float] | None:
-    """
-    Returns (per_100g dict, matched_key, confidence) or None.
-    """
-    q = _normalize_label(food_name)
-    if not q:
-        return None
-    rows = _load_local_table()
-
-    for row in rows:
-        key = row["food"]
-        nk = _normalize_label(key.replace("_", " "))
-        if q == nk or q == key:
-            return (
-                {
-                    "calories_per_100g": row["calories_per_100g"],
-                    "protein": row["protein"],
-                    "carbs": row["carbs"],
-                    "fat": row["fat"],
-                },
-                key,
-                1.0,
-            )
-
-    best: tuple[dict[str, Any], str, float] | None = None
-    for row in rows:
-        key = row["food"]
-        nk = _normalize_label(key.replace("_", " "))
-        if q in nk or nk in q:
-            cand = (
-                {
-                    "calories_per_100g": row["calories_per_100g"],
-                    "protein": row["protein"],
-                    "carbs": row["carbs"],
-                    "fat": row["fat"],
-                },
-                key,
-                0.82,
-            )
-            if best is None or len(nk) > len(best[1]):
-                best = cand
-    return best
-
-
-def _json_body(r: httpx.Response) -> dict[str, Any] | None:
-    ct = (r.headers.get("content-type") or "").lower()
-    if "application/json" not in ct and "json" not in ct:
-        return None
-    try:
-        out = r.json()
-        return out if isinstance(out, dict) else None
-    except ValueError:
-        return None
-
-
-def _fetch_off_search(
-    client: httpx.Client, url: str, params: dict[str, str], *, attempts: int = 4
-) -> dict[str, Any] | None:
-    """GET with retries; returns parsed JSON dict or None if all tries fail."""
-    base_delay = 0.85
-    for attempt in range(attempts):
-        try:
-            resp = client.get(url, params=params)
-        except httpx.RequestError:
-            time.sleep(base_delay * (attempt + 1))
-            continue
-
-        if resp.status_code == 200:
-            data = _json_body(resp)
-            if data is not None:
-                return data
-            time.sleep(base_delay * (attempt + 1))
-            continue
-
-        if resp.status_code in (429, 500, 502, 503, 504):
-            time.sleep(base_delay * (attempt + 1))
-            continue
-
-        # Other 4xx: do not hammer
-        break
-    return None
-
-
-def _nutrients_from_off_product(p: dict[str, Any]) -> dict[str, Any] | None:
-    n = p.get("nutriments") or {}
-    kcal = n.get("energy-kcal_100g")
-    if kcal is None and n.get("energy-kcal") is not None:
-        kcal = n.get("energy-kcal")
-    if kcal is None and n.get("energy_100g") is not None:
-        try:
-            kcal = float(n["energy_100g"]) / 4.184
-        except (TypeError, ValueError):
-            kcal = None
-    if kcal is None:
-        return None
-    try:
-        return {
-            "food_name": (p.get("product_name") or p.get("product_name_en") or "").strip()
-            or "unknown",
-            "calories_per_100g": float(kcal),
-            "protein": float(n.get("proteins_100g") or 0),
-            "carbs": float(n.get("carbohydrates_100g") or 0),
-            "fat": float(n.get("fat_100g") or 0),
-        }
-    except (TypeError, ValueError):
-        return None
-
-
-def lookup_open_food_facts(food_name: str) -> tuple[dict[str, Any], float] | None:
-    """
-    First suitable hit from Open Food Facts (per-100g where possible).
-    Uses v2 search first, then legacy CGI mirrors, with retries on overload.
-    """
-    q = food_name.strip()
-    if not q:
-        return None
-
-    saw_valid_json = False
-    timeout = httpx.Timeout(25.0, connect=10.0)
-
-    with httpx.Client(timeout=timeout, headers=OFF_HEADERS) as client:
-        for url, param_template in OFF_ENDPOINTS:
-            params = {**param_template, "search_terms": q}
-            data = _fetch_off_search(client, url, params)
-            if not data:
-                continue
-            saw_valid_json = True
-            for p in data.get("products") or []:
-                if not isinstance(p, dict):
-                    continue
-                parsed = _nutrients_from_off_product(p)
-                if parsed and _looks_like_reasonable_match(q, parsed.get("food_name", "")):
-                    return parsed, 0.72
-
-    if not saw_valid_json:
-        raise OpenFoodFactsUnavailableError(
-            "Open Food Facts is not responding right now (often temporary when their servers are busy). "
-            "Wait a minute and try again, or use a dish from the built-in list (e.g. “chicken curry”, “bibimbap”)."
-        )
-    return None
 
 
 @dataclass
@@ -288,62 +89,320 @@ class ResolvedNutrition:
     confidence: float
 
 
+def _normalize_label(value: str) -> str:
+    value = str(value or "").lower().strip()
+    value = re.sub(r"[^\w\s-]", "", value)
+    value = value.replace(" ", "_").replace("-", "_")
+    value = re.sub(r"_+", "_", value).strip("_")
+    return value
+
+
+def _token_set(value: str) -> set[str]:
+    normalized = _normalize_label(value).replace("_", " ")
+    return {token for token in normalized.split() if token}
+
+
+def _singularize_tokens(tokens: set[str]) -> set[str]:
+    out = set()
+    for token in tokens:
+        if token.endswith("s") and len(token) > 3:
+            out.add(token[:-1])
+        else:
+            out.add(token)
+    return out
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None or value == "":
+            return float(default)
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _looks_like_reasonable_match(query: str, candidate: str) -> bool:
+    q = _token_set(query)
+    c = _token_set(candidate)
+
+    if not q or not c:
+        return False
+
+    if q.intersection(c):
+        return True
+
+    q_relaxed = _singularize_tokens(q)
+    c_relaxed = _singularize_tokens(c)
+    return bool(q_relaxed.intersection(c_relaxed))
+
+
+def _load_local_table() -> list[dict[str, Any]]:
+    global _nutrition_rows
+
+    if _nutrition_rows is not None:
+        return _nutrition_rows
+
+    rows: list[dict[str, Any]] = []
+
+    if not NUTRITION_CSV.is_file():
+        _nutrition_rows = rows
+        return rows
+
+    with open(NUTRITION_CSV, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            try:
+                food_name = str(row["food"]).strip()
+                if not food_name:
+                    continue
+
+                rows.append(
+                    {
+                        "food": food_name,
+                        "calories_per_100g": _safe_float(row.get("calories_per_100g")),
+                        "protein": _safe_float(row.get("protein")),
+                        "carbs": _safe_float(row.get("carbs")),
+                        "fat": _safe_float(row.get("fat")),
+                    }
+                )
+            except KeyError:
+                continue
+
+    _nutrition_rows = rows
+    return rows
+
+
+def lookup_local(food_name: str) -> tuple[dict[str, Any], str, float] | None:
+    query = _normalize_label(food_name)
+    if not query:
+        return None
+
+    rows = _load_local_table()
+
+    for row in rows:
+        key = row["food"]
+        normalized_key = _normalize_label(key.replace("_", " "))
+        if query == normalized_key or query == key:
+            return (
+                {
+                    "calories_per_100g": row["calories_per_100g"],
+                    "protein": row["protein"],
+                    "carbs": row["carbs"],
+                    "fat": row["fat"],
+                },
+                key,
+                1.0,
+            )
+
+    best: tuple[dict[str, Any], str, float] | None = None
+    best_score = -1
+
+    for row in rows:
+        key = row["food"]
+        normalized_key = _normalize_label(key.replace("_", " "))
+        query_tokens = _token_set(query)
+        key_tokens = _token_set(normalized_key)
+
+        overlap = len(query_tokens.intersection(key_tokens))
+        if overlap <= 0 and not (query in normalized_key or normalized_key in query):
+            continue
+
+        score = overlap * 10 + min(len(normalized_key), len(query))
+        if score > best_score:
+            best_score = score
+            best = (
+                {
+                    "calories_per_100g": row["calories_per_100g"],
+                    "protein": row["protein"],
+                    "carbs": row["carbs"],
+                    "fat": row["fat"],
+                },
+                key,
+                0.82,
+            )
+
+    return best
+
+
+def _json_body(response: httpx.Response) -> dict[str, Any] | None:
+    content_type = (response.headers.get("content-type") or "").lower()
+    if "application/json" not in content_type and "json" not in content_type:
+        return None
+
+    try:
+        payload = response.json()
+        return payload if isinstance(payload, dict) else None
+    except ValueError:
+        return None
+
+
+def _fetch_off_search(
+    client: httpx.Client,
+    url: str,
+    params: dict[str, str],
+    *,
+    attempts: int = 4,
+) -> dict[str, Any] | None:
+    base_delay = 0.85
+
+    for attempt in range(attempts):
+        try:
+            response = client.get(url, params=params)
+        except httpx.RequestError:
+            time.sleep(base_delay * (attempt + 1))
+            continue
+
+        if response.status_code == 200:
+            data = _json_body(response)
+            if data is not None:
+                return data
+            time.sleep(base_delay * (attempt + 1))
+            continue
+
+        if response.status_code in (429, 500, 502, 503, 504):
+            time.sleep(base_delay * (attempt + 1))
+            continue
+
+        break
+
+    return None
+
+
+def _nutrients_from_off_product(product: dict[str, Any]) -> dict[str, Any] | None:
+    nutriments = product.get("nutriments") or {}
+
+    kcal = nutriments.get("energy-kcal_100g")
+    if kcal is None and nutriments.get("energy-kcal") is not None:
+        kcal = nutriments.get("energy-kcal")
+    if kcal is None and nutriments.get("energy_100g") is not None:
+        try:
+            kcal = float(nutriments["energy_100g"]) / 4.184
+        except (TypeError, ValueError):
+            kcal = None
+
+    if kcal is None:
+        return None
+
+    display_name = (
+        product.get("product_name")
+        or product.get("product_name_en")
+        or ""
+    ).strip()
+
+    if not display_name:
+        display_name = "unknown"
+
+    return {
+        "food_name": display_name,
+        "calories_per_100g": _safe_float(kcal),
+        "protein": _safe_float(nutriments.get("proteins_100g")),
+        "carbs": _safe_float(nutriments.get("carbohydrates_100g")),
+        "fat": _safe_float(nutriments.get("fat_100g")),
+    }
+
+
+def lookup_open_food_facts(food_name: str) -> tuple[dict[str, Any], float] | None:
+    query = str(food_name or "").strip()
+    if not query:
+        return None
+
+    saw_valid_json = False
+    timeout = httpx.Timeout(25.0, connect=10.0)
+
+    with httpx.Client(timeout=timeout, headers=OFF_HEADERS) as client:
+        for url, param_template in OFF_ENDPOINTS:
+            params = {**param_template, "search_terms": query}
+            data = _fetch_off_search(client, url, params)
+
+            if not data:
+                continue
+
+            saw_valid_json = True
+
+            for product in data.get("products") or []:
+                if not isinstance(product, dict):
+                    continue
+
+                parsed = _nutrients_from_off_product(product)
+                if not parsed:
+                    continue
+
+                if _looks_like_reasonable_match(query, parsed.get("food_name", "")):
+                    return parsed, 0.72
+
+    if not saw_valid_json:
+        raise OpenFoodFactsUnavailableError(
+            "Open Food Facts is temporarily unavailable. Try again later or use a local food item."
+        )
+
+    return None
+
+
 def resolve_food(food_name: str, grams: float) -> ResolvedNutrition:
+    grams = _safe_float(grams)
     if grams <= 0:
         raise ValueError("grams must be positive")
 
-    name = food_name.strip()
-    nk = _normalize_label(name)
-    if nk in _TYPO_ALIASES:
-        name = _TYPO_ALIASES[nk]
+    name = str(food_name or "").strip()
+    if not name:
+        raise ValueError("food_name cannot be empty")
 
-    local = lookup_local(name)
-    if local:
-        per, key, conf = local
-        cph = per["calories_per_100g"]
-        pph = per["protein"]
-        carbph = per["carbs"]
-        fph = per["fat"]
+    normalized_name = _normalize_label(name)
+    if normalized_name in _TYPO_ALIASES:
+        name = _TYPO_ALIASES[normalized_name]
+
+    local_result = lookup_local(name)
+    if local_result:
+        per_100g, matched_key, confidence = local_result
         factor = grams / 100.0
+
+        cals_100 = _safe_float(per_100g["calories_per_100g"])
+        protein_100 = _safe_float(per_100g["protein"])
+        carbs_100 = _safe_float(per_100g["carbs"])
+        fat_100 = _safe_float(per_100g["fat"])
+
         return ResolvedNutrition(
-            display_name=key.replace("_", " ").title(),
-            matched_key=key,
+            display_name=matched_key.replace("_", " ").title(),
+            matched_key=matched_key,
             grams=grams,
-            calories=cph * factor,
-            protein=pph * factor,
-            carbs=carbph * factor,
-            fat=fph * factor,
-            calories_per_100g=cph,
-            protein_per_100g=pph,
-            carbs_per_100g=carbph,
-            fat_per_100g=fph,
+            calories=cals_100 * factor,
+            protein=protein_100 * factor,
+            carbs=carbs_100 * factor,
+            fat=fat_100 * factor,
+            calories_per_100g=cals_100,
+            protein_per_100g=protein_100,
+            carbs_per_100g=carbs_100,
+            fat_per_100g=fat_100,
             source="local_csv",
-            confidence=conf,
+            confidence=confidence,
         )
 
-    off = lookup_open_food_facts(name)
-    if off:
-        parsed, conf = off
-        cph = parsed["calories_per_100g"]
-        pph = parsed["protein"]
-        carbph = parsed["carbs"]
-        fph = parsed["fat"]
+    off_result = lookup_open_food_facts(name)
+    if off_result:
+        parsed, confidence = off_result
         factor = grams / 100.0
+
+        cals_100 = _safe_float(parsed["calories_per_100g"])
+        protein_100 = _safe_float(parsed["protein"])
+        carbs_100 = _safe_float(parsed["carbs"])
+        fat_100 = _safe_float(parsed["fat"])
+
         label = parsed["food_name"]
+
         return ResolvedNutrition(
             display_name=label,
             matched_key=label,
             grams=grams,
-            calories=cph * factor,
-            protein=pph * factor,
-            carbs=carbph * factor,
-            fat=fph * factor,
-            calories_per_100g=cph,
-            protein_per_100g=pph,
-            carbs_per_100g=carbph,
-            fat_per_100g=fph,
+            calories=cals_100 * factor,
+            protein=protein_100 * factor,
+            carbs=carbs_100 * factor,
+            fat=fat_100 * factor,
+            calories_per_100g=cals_100,
+            protein_per_100g=protein_100,
+            carbs_per_100g=carbs_100,
+            fat_per_100g=fat_100,
             source="open_food_facts",
-            confidence=conf,
+            confidence=confidence,
         )
 
     raise LookupError(f"No nutrition data found for {food_name!r}")
