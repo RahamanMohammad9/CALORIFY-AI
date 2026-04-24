@@ -1,0 +1,10 @@
+Metric,Value
+Accuracy,0.8784
+Top-3 Accuracy,0.9658
+Top-5 Accuracy,0.9812
+Macro F1,0.8757
+Weighted F1,0.8774
+ROC-AUC,0.9985
+PR-AUC,0.9421
+ECE,0.1062
+Brier Score,0.0019

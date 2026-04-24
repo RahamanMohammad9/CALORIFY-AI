@@ -251,16 +251,16 @@ render_page_header(
 )
 
 st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-st.subheader("Project Highlights")
-h1, h2 = st.columns(2)
-with h1:
-    st.write("**USP:** AI Nutrition Coach, not just calorie tracking.")
-    st.write("**Core stack:** Computer Vision + Streamlit + SQLite + Analytics.")
-    st.write("**Personalization:** BMI, BMR, activity-aware targets, goal-based macros.")
-with h2:
-    st.write("**Actionable guidance:** over/under alerts and smart meal suggestions.")
-    st.write("**Data storytelling:** trends, projections, and behavior insights.")
-    st.write("**Health ecosystem:** food, water, weight, sleep, and activity tracking.")
+with st.expander("Project Highlights", expanded=False):
+    h1, h2 = st.columns(2)
+    with h1:
+        st.write("**USP:** AI Nutrition Coach, not just calorie tracking.")
+        st.write("**Core stack:** Computer Vision + Streamlit + SQLite + Analytics.")
+        st.write("**Personalization:** BMI, BMR, activity-aware targets, goal-based macros.")
+    with h2:
+        st.write("**Actionable guidance:** over/under alerts and smart meal suggestions.")
+        st.write("**Data storytelling:** trends, projections, and behavior insights.")
+        st.write("**Health ecosystem:** food, water, weight, sleep, and activity tracking.")
 st.markdown('</div>', unsafe_allow_html=True)
 
 # -----------------------------
@@ -276,11 +276,12 @@ DASHBOARD_NAV = [
     ("pages/7_Sleep_Tracker.py", "😴", "Sleep Tracker", "Sleep duration trends"),
     ("pages/8_Activity_Tracker.py", "🏃", "Activity Tracker", "Steps and workouts"),
     ("pages/1_Profile.py", "👤", "Profile", "Goals and targets"),
+    ("pages/9_Model_Comparison.py", "🧪", "Model Comparison", "Compare deep learning models"),
 ]
 
 st.markdown(
     """
-    <style>
+    <style> 
     .dash-hub-card {
         border-radius: 14px;
         border: 1px solid rgba(148, 163, 184, 0.14);

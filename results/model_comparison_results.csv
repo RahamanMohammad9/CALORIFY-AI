@@ -1,0 +1,6 @@
+model_key,model_name,best_epoch,best_val_accuracy_pct,training_time_sec,trainable_params,total_params,saved_model_size_mb,avg_inference_ms_per_image,test_accuracy_pct,test_macro_f1,test_weighted_f1,test_top3_accuracy_pct
+resnet50,ResNet50,18,87.5097,14677.97,22268004,23712932,90.763,1.6935,87.896,0.876281,0.877946,96.6006
+efficientnet_b0,EfficientNet-B0,17,83.4492,12587.92,3283840,4135648,16.065,1.3469,83.4664,0.828846,0.833639,94.9094
+mobilenet_v3_large,MobileNetV3-Large,19,83.7668,12886.29,3537644,4330132,16.719,2.1195,83.3891,0.829287,0.833132,94.7292
+resnet18,ResNet18,18,80.4189,12315.39,10544740,11227812,42.907,1.4665,79.9897,0.793482,0.798788,92.9779
+densenet121,DenseNet121,20,78.084,13148.33,2262628,7056356,27.501,2.2914,77.3972,0.765552,0.773382,91.0894

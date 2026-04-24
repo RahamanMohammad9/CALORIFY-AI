@@ -75,7 +75,7 @@ except Exception as e:
     st.stop()
 
 try:
-    class_names, _model, device = load_model_bundle()
+    class_names, _model, device, active_model_name = load_model_bundle()
 except FileNotFoundError:
     st.error("Model file not found. Please place your trained model file in the models folder.")
     st.stop()
@@ -214,6 +214,7 @@ with st.sidebar:
     )
 
     st.markdown("---")
+    st.write(f"**Active model:** `{active_model_name}`")
     st.write(f"**Model device:** `{device}`")
     st.write(f"**Food classes loaded:** `{len(class_names)}`")
     st.caption("Portion weight below applies to the **From photo** tab.")
@@ -416,6 +417,7 @@ with tab_photo:
         if uploaded_file is None:
             st.write("Upload an image to view prediction and nutrition details.")
         else:
+            st.write(f"**Active model:** {active_model_name}")
             st.write(f"**Model Prediction:** {predicted_food}")
             if not detect_multiple:
                 st.write(f"**Selected Food:** {selected_food}")
