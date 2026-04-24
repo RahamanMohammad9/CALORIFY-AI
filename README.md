@@ -81,14 +81,6 @@ app/
 models/
 Screenshots
 
-Add screenshots of:
-
-Dashboard
-Add Meal (AI prediction)
-Analytics
-Interview Summary
-
-"I developed an AI-powered nutrition system that integrates computer vision, personalized health modeling, and behavioral analytics to provide real-time dietary insights."
 
 Limitations
 Not a substitute for medical advice
